@@ -5,6 +5,7 @@ import * as events from '@aws-cdk/aws-events';
 import * as iam from '@aws-cdk/aws-iam';
 import { Stack } from '@aws-cdk/core';
 import { Construct } from 'constructs';
+import { dockerRegistriesInstallCommands, DockerRegistry } from '../docker-registry';
 import { embeddedAsmPath } from '../private/construct-internals';
 
 // v2 - keep this import as a separate section to reduce merge conflict when forward merging with the v2 branch.
@@ -53,6 +54,9 @@ export interface UpdatePipelineActionProps {
    * @default - false
    */
   readonly privileged?: boolean
+
+  /** Docstrings */
+  readonly dockerRegistries: DockerRegistry[];
 }
 
 /**
@@ -83,7 +87,10 @@ export class UpdatePipelineAction extends CoreConstruct implements codepipeline.
         version: '0.2',
         phases: {
           install: {
-            commands: `npm install -g aws-cdk${installSuffix}`,
+            commands: [
+              `npm install -g aws-cdk${installSuffix}`,
+              ...dockerRegistriesInstallCommands(props.dockerRegistries),
+            ],
           },
           build: {
             commands: [
@@ -114,6 +121,8 @@ export class UpdatePipelineAction extends CoreConstruct implements codepipeline.
       actions: ['s3:ListBucket'],
       resources: ['*'],
     }));
+    (props.dockerRegistries ?? []).forEach(reg => reg.grantRead(selfMutationProject));
+
     this.action = new cpactions.CodeBuildAction({
       actionName: 'SelfMutate',
       input: props.cloudAssemblyInput,

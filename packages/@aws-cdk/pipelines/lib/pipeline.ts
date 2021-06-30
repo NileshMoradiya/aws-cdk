@@ -5,12 +5,14 @@ import * as iam from '@aws-cdk/aws-iam';
 import { Annotations, App, Aws, CfnOutput, Fn, Lazy, PhysicalName, Stack, Stage } from '@aws-cdk/core';
 import { Construct } from 'constructs';
 import { AssetType, DeployCdkStackAction, PublishAssetsAction, UpdatePipelineAction } from './actions';
+import { dockerRegistriesInstallCommands, DockerRegistry } from './docker-registry';
 import { appOf, assemblyBuilderOf } from './private/construct-internals';
 import { AddStageOptions, AssetPublishingCommand, CdkStage, StackOutput } from './stage';
 
 // v2 - keep this import as a separate section to reduce merge conflict when forward merging with the v2 branch.
 // eslint-disable-next-line
 import { Construct as CoreConstruct } from '@aws-cdk/core';
+import { SimpleSynthAction } from './synths';
 
 const CODE_BUILD_LENGTH_LIMIT = 100;
 /**
@@ -151,6 +153,15 @@ export interface CdkPipelineProps {
    * @default - false
    */
   readonly supportDockerAssets?: boolean;
+
+  /**
+   * A list of Docker registries and their credentials.
+   *
+   * Specify any credentials necessary within the pipeline to build, synth, update, or publish assets.
+   *
+   * @default []
+   */
+  readonly dockerRegistries?: DockerRegistry[];
 }
 
 /**
@@ -171,6 +182,7 @@ export class CdkPipeline extends CoreConstruct {
   private readonly _stages: CdkStage[] = [];
   private readonly _outputArtifacts: Record<string, codepipeline.Artifact> = {};
   private readonly _cloudAssemblyArtifact: codepipeline.Artifact;
+  private readonly _dockerRegistries: DockerRegistry[];
 
   constructor(scope: Construct, id: string, props: CdkPipelineProps) {
     super(scope, id);
@@ -180,6 +192,7 @@ export class CdkPipeline extends CoreConstruct {
     }
 
     this._cloudAssemblyArtifact = props.cloudAssemblyArtifact;
+    this._dockerRegistries = props.dockerRegistries ?? [];
     const pipelineStack = Stack.of(this);
 
     if (props.codePipeline) {
@@ -218,6 +231,10 @@ export class CdkPipeline extends CoreConstruct {
     }
 
     if (props.synthAction) {
+      if (props.synthAction instanceof SimpleSynthAction && this._dockerRegistries.length > 0) {
+        props.synthAction._addDockerRegistries(this._dockerRegistries);
+      }
+
       this._pipeline.addStage({
         stageName: 'Build',
         actions: [props.synthAction],
@@ -233,6 +250,7 @@ export class CdkPipeline extends CoreConstruct {
           cdkCliVersion: props.cdkCliVersion,
           projectName: maybeSuffix(props.pipelineName, '-selfupdate'),
           privileged: props.supportDockerAssets,
+          dockerRegistries: this._dockerRegistries,
         })],
       });
     }
@@ -246,6 +264,7 @@ export class CdkPipeline extends CoreConstruct {
       subnetSelection: props.subnetSelection,
       singlePublisherPerType: props.singlePublisherPerType,
       preInstallCommands: props.assetPreInstallCommands,
+      dockerRegistries: this._dockerRegistries,
     });
   }
 
@@ -397,6 +416,7 @@ interface AssetPublishingProps {
   readonly subnetSelection?: ec2.SubnetSelection;
   readonly singlePublisherPerType?: boolean;
   readonly preInstallCommands?: string[];
+  readonly dockerRegistries: DockerRegistry[];
 }
 
 /**
@@ -414,6 +434,7 @@ class AssetPublishing extends CoreConstruct {
   private readonly lastStageBeforePublishing?: codepipeline.IStage;
   private readonly stages: codepipeline.IStage[] = [];
   private readonly pipeline: codepipeline.Pipeline;
+  private readonly dockerRegistries: DockerRegistry[];
 
   private _fileAssetCtr = 0;
   private _dockerAssetCtr = 0;
@@ -427,6 +448,8 @@ class AssetPublishing extends CoreConstruct {
     const stages: codepipeline.IStage[] = (this.props.pipeline as any)._stages;
     // Any asset publishing stages will be added directly after the last stage that currently exists.
     this.lastStageBeforePublishing = stages.slice(-1)[0];
+
+    this.dockerRegistries = props.dockerRegistries;
   }
 
   /**
@@ -496,7 +519,7 @@ class AssetPublishing extends CoreConstruct {
         vpc: this.props.vpc,
         subnetSelection: this.props.subnetSelection,
         createBuildspecFile: this.props.singlePublisherPerType,
-        preInstallCommands: this.props.preInstallCommands,
+        preInstallCommands: [...(this.props.preInstallCommands ?? []), ...dockerRegistriesInstallCommands(this.dockerRegistries)],
       });
       this.stages[stageIndex].addAction(action);
     }
@@ -565,6 +588,9 @@ class AssetPublishing extends CoreConstruct {
       actions: ['sts:AssumeRole'],
       resources: Lazy.list({ produce: () => [...this.assetPublishingRoles[assetType]].map(arn => Fn.sub(arn)) }),
     }));
+
+    // Grant pull access for any ECR registries and secrets that exist
+    this.dockerRegistries.forEach(reg => reg.grantRead(assetRole));
 
     // Artifact access
     this.pipeline.artifactBucket.grantRead(assetRole);

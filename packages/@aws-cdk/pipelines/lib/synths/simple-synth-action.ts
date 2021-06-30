@@ -7,6 +7,8 @@ import * as ec2 from '@aws-cdk/aws-ec2';
 import * as events from '@aws-cdk/aws-events';
 import * as iam from '@aws-cdk/aws-iam';
 import { Stack } from '@aws-cdk/core';
+import { dockerRegistriesInstallCommands, DockerRegistry } from '../docker-registry';
+import { DockerRegistryList } from '../pipeline';
 import { toPosixPath } from '../private/fs';
 import { copyEnvironmentVariables, filterEmpty } from './_util';
 
@@ -254,6 +256,7 @@ export class SimpleSynthAction implements codepipeline.IAction, iam.IGrantable {
   private _action?: codepipeline_actions.CodeBuildAction;
   private _actionProperties: codepipeline.ActionProperties;
   private _project?: codebuild.IProject;
+  private _dockerRegistries?: DockerRegistry[];
 
   constructor(private readonly props: SimpleSynthActionProps) {
     // A number of actionProperties get read before bind() is even called (so before we
@@ -328,6 +331,7 @@ export class SimpleSynthAction implements codepipeline.IAction, iam.IGrantable {
           commands: filterEmpty([
             this.props.subdirectory ? `cd ${this.props.subdirectory}` : '',
             ...installCommands,
+            ...dockerRegistriesInstallCommands(this._dockerRegistries),
           ]),
         },
         build: {
@@ -373,6 +377,8 @@ export class SimpleSynthAction implements codepipeline.IAction, iam.IGrantable {
     }
 
     this._project = project;
+
+    this._dockerRegistries?.forEach(reg => reg.grantRead(project.grantPrincipal));
 
     this._action = new codepipeline_actions.CodeBuildAction({
       actionName: this.actionProperties.actionName,
@@ -442,6 +448,14 @@ export class SimpleSynthAction implements codepipeline.IAction, iam.IGrantable {
     }
 
     return this._action.onStateChange(name, target, options);
+  }
+
+  /**
+   * Docstrings
+   * @internal
+   */
+  public _addDockerRegistries(dockerRegistries: DockerRegistryList) {
+    this._dockerRegistries = dockerRegistries;
   }
 }
 
